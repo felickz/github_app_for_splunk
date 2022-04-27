@@ -1,33 +1,28 @@
 <form version="1.1" theme="dark">
-  <label>Code Scanning Alerts</label>
+  <label>Advanced Security Overview</label>
   <search id="baseSearch">
     <query>
-      `github_webhooks` (eventtype="GitHub::CodeScanning" OR eventtype="GitHub::Push") | eval action='action', tool=if(isnotnull('alert.tool.name'),'alert.tool.name','unknown'), repository=if(isnotnull('repository.name'),'repository.name','unknown'), severity=if(isnotnull('alert.rule.security_severity_level'),'alert.rule.security_severity_level','none'), create_time=if(isnotnull('alert.created_at'),'alert.created_at','unknown'), received_time='_time', alert_url=if(isnotnull('alert.html_url'),'alert.html_url','unknown'), eventtype='eventtype', created=strptime(create_time, "%Y-%m-%dT%H:%M:%S%Z"), duration=received_time - created, duration_str=tostring(avg(duration), "duration")
+`github_webhooks` alert.created_at=*
+    | eval type=case((eventtype="GitHub::CodeScanning"), "Code Scanning Alert", (eventtype="GitHub::VulnerabilityAlert"), "Dependabot Alert", (eventtype="GitHub::SecretScanning"), "Secret Scanning Alert")
+    | eval url=case((eventtype="GitHub::CodeScanning"), 'alert.html_url', (eventtype="GitHub::VulnerabilityAlert"), 'repository.html_url'+"/security/dependabot/"+'alert.number', (eventtype="GitHub::SecretScanning"), 'alert.html_url')    
+    | eval reason=case((type="Dependabot Alert"),'alert.affected_package_name',(type="Code Scanning Alert"), 'alert.rule.name', (type="Secret Scanning Alert"), 'alert.secret_type'), id=case((type="Dependabot Alert"),'alert.external_identifier',(type="Code Scanning Alert"), 'alert.rule.id', (type="Secret Scanning Alert"), 'alert.number'), severity=case((type="Dependabot Alert"),'alert.severity',(type="Code Scanning Alert"), 'alert.rule.security_severity_level', (type="Secret Scanning Alert"), "high"), repository = 'repository.full_name'
+    | stats latest(action) as status, earliest(alert.created_at) as created_at, latest(alert.number) as number by repository, reason, id, type, severity, url
+    | eval source=type
+    | eval age = toString(round(now() - strptime(created_at, "%Y-%m-%dT%H:%M:%S")),"Duration") 
+    | search severity IN("*") status IN("*") type IN("*") 
+    | sort -age
     </query>
     <earliest>$timeTkn.earliest$</earliest>
     <latest>$timeTkn.latest$</latest>
     <sampleRatio>1</sampleRatio>
   </search>
   <fieldset submitButton="false" autoRun="true">
-    <input type="time" token="timeTkn" searchWhenChanged="true">
-      <label>Time Range</label>
+    <input type="time" token="timeTkn">
+      <label></label>
       <default>
-        <earliest>-24h@h</earliest>
+        <earliest>-30d@d</earliest>
         <latest>now</latest>
       </default>
-    </input>
-    <input type="multiselect" token="tool_name" searchWhenChanged="true">
-      <label>Tool</label>
-      <fieldForLabel>tool</fieldForLabel>
-      <fieldForValue>tool</fieldForValue>
-      <valuePrefix>"</valuePrefix>
-      <valueSuffix>"</valueSuffix>
-      <search base="baseSearch">
-        <query>| table tool | dedup tool</query>
-      </search>
-      <choice value="*">All</choice>
-      <default>*</default>
-      <initialValue>*</initialValue>
     </input>
     <input type="multiselect" token="repoTkn" searchWhenChanged="true">
       <label>Repositories</label>
@@ -37,154 +32,226 @@
       <valuePrefix>"</valuePrefix>
       <valueSuffix>"</valueSuffix>
       <delimiter>,</delimiter>
-      <fieldForLabel>repository</fieldForLabel>
-      <fieldForValue>repository</fieldForValue>
-      <search base="baseSearch">
-        <query>| dedup repository | table repository</query>
+      <fieldForLabel>repository.name</fieldForLabel>
+      <fieldForValue>repository.name</fieldForValue>
+      <search>
+        <query>`github_webhooks` alert.created_at=* | dedup repository.name | table repository.name</query>
+        <earliest>$timeTkn.earliest$</earliest>
+        <latest>$timeTkn.latest$</latest>
       </search>
     </input>
   </fieldset>
   <row>
     <panel>
-      <single>
-        <title>Created</title>
-        <search base="baseSearch">
-          <query>| search tool=$tool_name$ repository=$repoTkn$ action="created" | stats count</query>
-        </search>
-        <option name="drilldown">none</option>
-        <option name="height">50</option>
-        <option name="rangeColors">["0x53a051","0x0877a6","0xf8be34","0xf1813f","0xdc4e41"]</option>
-        <option name="refresh.display">progressbar</option>
-      </single>
-    </panel>
-    <panel>
-      <single>
-        <title>Fixed</title>
-        <search base="baseSearch">
-          <query>| search tool=$tool_name$ repository=$repoTkn$ action="fixed" | stats count</query>
-        </search>
-        <option name="drilldown">none</option>
-        <option name="height">50</option>
-        <option name="refresh.display">progressbar</option>
-      </single>
-    </panel>
-    <panel>
-      <single>
-        <title>Reopened</title>
-        <search base="baseSearch">
-          <query>| search tool=$tool_name$ repository=$repoTkn$ action="reopened" | stats count</query>
-        </search>
-        <option name="drilldown">none</option>
-        <option name="height">50</option>
-        <option name="refresh.display">progressbar</option>
-      </single>
-    </panel>
-  </row>
-  <row>
-    <panel>
+      <title>Open Alerts By Severity</title>
       <chart>
-        <title>Alert Found/Fixed Ratio</title>
         <search base="baseSearch">
-          <query>| search tool=$tool_name$ repository=$repoTkn$ (action=created OR action=fixed)
-| timechart count(_raw)  by action
-| accum created
-| accum fixed
-| rename created as "Found"
-| rename fixed as "Fixed"</query>
+          <query> | search status IN("create","created") | stats count by severity</query>
         </search>
-        <option name="charting.axisTitleX.visibility">collapsed</option>
-        <option name="charting.chart">line</option>
+        <option name="charting.axisLabelsX.majorLabelStyle.overflowMode">ellipsisNone</option>
+        <option name="charting.axisLabelsX.majorLabelStyle.rotation">0</option>
+        <option name="charting.axisTitleX.visibility">visible</option>
+        <option name="charting.axisTitleY.visibility">visible</option>
+        <option name="charting.axisTitleY2.visibility">visible</option>
+        <option name="charting.axisX.abbreviation">none</option>
+        <option name="charting.axisX.scale">linear</option>
+        <option name="charting.axisY.abbreviation">none</option>
+        <option name="charting.axisY.scale">linear</option>
+        <option name="charting.axisY2.abbreviation">none</option>
+        <option name="charting.axisY2.enabled">0</option>
+        <option name="charting.axisY2.scale">inherit</option>
+        <option name="charting.chart">pie</option>
+        <option name="charting.chart.bubbleMaximumSize">50</option>
+        <option name="charting.chart.bubbleMinimumSize">10</option>
+        <option name="charting.chart.bubbleSizeBy">area</option>
+        <option name="charting.chart.nullValueMode">gaps</option>
+        <option name="charting.chart.showDataLabels">none</option>
+        <option name="charting.chart.sliceCollapsingThreshold">0.01</option>
+        <option name="charting.chart.stackMode">default</option>
+        <option name="charting.chart.style">shiny</option>
         <option name="charting.drilldown">none</option>
-        <option name="refresh.display">progressbar</option>
-        <option name="height">150</option>
-      </chart>
-    </panel>
-    <panel>
-      <chart>
-        <title>Commit/Alert Ratio</title>
-        <search base="baseSearch">
-          <query>| search  (eventtype="GitHub::Push" repository=$repoTkn$) OR ((action=created OR action=reopened) tool=$tool_name$ repository=$repoTkn$ )
-| timechart count(_raw)  by eventtype
-| accum "GitHub::Push"
-| accum "GitHub::CodeScanning"
-| rename GitHub::Push as "Pushes"
-| rename GitHub::CodeScanning as "Code Scanning Alerts"</query>
-        </search>
-        <option name="charting.axisTitleX.visibility">collapsed</option>
-        <option name="charting.axisY.scale">log</option>
-        <option name="charting.axisY2.enabled">1</option>
-        <option name="charting.chart">line</option>
-        <option name="charting.chart.overlayFields">DC_cumulative</option>
-        <option name="charting.drilldown">none</option>
+        <option name="charting.fieldColors">{"critical": 0xF85149, "high": 0xDB6D28, "medium":0xD29922, "moderate":0xD29922, "low":0xC9D1D9}</option>
+        <option name="charting.layout.splitSeries">0</option>
+        <option name="charting.layout.splitSeries.allowIndependentYRanges">0</option>
+        <option name="charting.legend.labelStyle.overflowMode">ellipsisMiddle</option>
         <option name="charting.legend.mode">standard</option>
-        <option name="height">150</option>
+        <option name="charting.legend.placement">right</option>
+        <option name="charting.lineWidth">2</option>
         <option name="refresh.display">progressbar</option>
+        <option name="trellis.enabled">0</option>
+        <option name="trellis.scales.shared">1</option>
+        <option name="trellis.size">medium</option>
       </chart>
     </panel>
     <panel>
+      <title>Open Alerts By Repository</title>
       <chart>
-        <title>New Alerts by Tool</title>
         <search base="baseSearch">
-          <query>| search tool=$tool_name$ repository=$repoTkn$ (action=created OR action=appeared_in_branch) | timechart count(_raw)  by tool</query>
+          <query>| search status IN("create","created") | stats count by repository</query>
         </search>
-        <option name="charting.chart">column</option>
-        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.axisLabelsX.majorLabelStyle.overflowMode">ellipsisNone</option>
+        <option name="charting.axisLabelsX.majorLabelStyle.rotation">0</option>
+        <option name="charting.axisTitleX.visibility">visible</option>
+        <option name="charting.axisTitleY.visibility">visible</option>
+        <option name="charting.axisTitleY2.visibility">visible</option>
+        <option name="charting.axisX.abbreviation">none</option>
+        <option name="charting.axisX.scale">linear</option>
+        <option name="charting.axisY.abbreviation">none</option>
+        <option name="charting.axisY.scale">linear</option>
+        <option name="charting.axisY2.abbreviation">none</option>
+        <option name="charting.axisY2.enabled">0</option>
+        <option name="charting.axisY2.scale">inherit</option>
+        <option name="charting.chart">pie</option>
+        <option name="charting.chart.bubbleMaximumSize">50</option>
+        <option name="charting.chart.bubbleMinimumSize">10</option>
+        <option name="charting.chart.bubbleSizeBy">area</option>
+        <option name="charting.chart.nullValueMode">gaps</option>
+        <option name="charting.chart.showDataLabels">none</option>
+        <option name="charting.chart.sliceCollapsingThreshold">0.01</option>
+        <option name="charting.chart.stackMode">default</option>
+        <option name="charting.chart.style">shiny</option>
         <option name="charting.drilldown">none</option>
-        <option name="height">150</option>
+        <option name="charting.layout.splitSeries">0</option>
+        <option name="charting.layout.splitSeries.allowIndependentYRanges">0</option>
+        <option name="charting.legend.labelStyle.overflowMode">ellipsisMiddle</option>
+        <option name="charting.legend.mode">standard</option>
+        <option name="charting.legend.placement">right</option>
+        <option name="charting.lineWidth">2</option>
         <option name="refresh.display">progressbar</option>
+        <option name="trellis.enabled">0</option>
+        <option name="trellis.scales.shared">1</option>
+        <option name="trellis.size">medium</option>
       </chart>
     </panel>
-  </row>
-  <row>
     <panel>
-      <table>
-        <title>Fixed Alerts</title>
+      <title>Open Alerts by Type</title>
+      <chart>
         <search base="baseSearch">
-          <query> | search (action=fixed OR action=closed_by_user) repository=$repoTkn$ tool=$tool_name$
-| table repository, tool, alert_url,duration_str
-| rename repository AS "Repository" duration_str AS "Time to Resolution",tool AS "Tool", alert_url AS "Alert URL"
-| sort -"Time to Resolution"
-          </query>
+          <query>| search status IN("create","created") | stats count by type</query>
         </search>
+        <option name="charting.axisLabelsX.majorLabelStyle.overflowMode">ellipsisNone</option>
+        <option name="charting.axisLabelsX.majorLabelStyle.rotation">0</option>
+        <option name="charting.axisTitleX.visibility">visible</option>
+        <option name="charting.axisTitleY.visibility">visible</option>
+        <option name="charting.axisTitleY2.visibility">visible</option>
+        <option name="charting.axisX.abbreviation">none</option>
+        <option name="charting.axisX.scale">linear</option>
+        <option name="charting.axisY.abbreviation">none</option>
+        <option name="charting.axisY.scale">linear</option>
+        <option name="charting.axisY2.abbreviation">none</option>
+        <option name="charting.axisY2.enabled">0</option>
+        <option name="charting.axisY2.scale">inherit</option>
+        <option name="charting.chart">pie</option>
+        <option name="charting.chart.bubbleMaximumSize">50</option>
+        <option name="charting.chart.bubbleMinimumSize">10</option>
+        <option name="charting.chart.bubbleSizeBy">area</option>
+        <option name="charting.chart.nullValueMode">gaps</option>
+        <option name="charting.chart.showDataLabels">none</option>
+        <option name="charting.chart.sliceCollapsingThreshold">0.01</option>
+        <option name="charting.chart.stackMode">default</option>
+        <option name="charting.chart.style">shiny</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.layout.splitSeries">0</option>
+        <option name="charting.layout.splitSeries.allowIndependentYRanges">0</option>
+        <option name="charting.legend.labelStyle.overflowMode">ellipsisMiddle</option>
+        <option name="charting.legend.mode">standard</option>
+        <option name="charting.legend.placement">right</option>
+        <option name="charting.lineWidth">2</option>
+        <option name="trellis.enabled">0</option>
+        <option name="trellis.scales.shared">1</option>
+        <option name="trellis.size">medium</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Resolved Alert Count</title>
+      <single>
+        <search base="baseSearch">
+          <query>| search status IN("dismiss","resolve","closed_by_user","fixed")| stats count</query>
+        </search>
+        <option name="colorBy">value</option>
+        <option name="colorMode">none</option>
         <option name="drilldown">none</option>
-      </table>
+        <option name="height">250</option>
+        <option name="numberPrecision">0</option>
+        <option name="rangeColors">["0x53a051", "0x0877a6", "0xf8be34", "0xf1813f", "0xdc4e41"]</option>
+        <option name="rangeValues">[0,30,70,100]</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="showSparkline">1</option>
+        <option name="showTrendIndicator">1</option>
+        <option name="trellis.enabled">0</option>
+        <option name="trellis.scales.shared">1</option>
+        <option name="trellis.size">medium</option>
+        <option name="trendColorInterpretation">standard</option>
+        <option name="trendDisplayMode">absolute</option>
+        <option name="unitPosition">after</option>
+        <option name="useColors">0</option>
+        <option name="useThousandSeparators">1</option>
+      </single>
     </panel>
   </row>
   <row>
     <panel>
-      <table>
-        <title>Alerts by Severity</title>
+      <title>Alert Details</title>
+      <input type="multiselect" token="typeTkn" searchWhenChanged="true">
+        <label>Type</label>
+        <choice value="*">All</choice>
+        <default>*</default>
+        <initialValue>*</initialValue>
         <search base="baseSearch">
-          <query>| search (action=created OR action=reopened) repository=$repoTkn$ tool=$tool_name$ | chart usenull=f count  over repository by severity</query>
+          <query>|dedup type| table type</query>
         </search>
-        <option name="drilldown">none</option>
-        <format type="color" field="critical">
-          <colorPalette type="minMidMax" maxColor="#DC4E41" minColor="#FFFFFF"></colorPalette>
-          <scale type="minMidMax"></scale>
-        </format>
-        <format type="color" field="high">
-          <colorPalette type="minMidMax" maxColor="#F8BE34" minColor="#FFFFFF"></colorPalette>
-          <scale type="minMidMax"></scale>
-        </format>
-        <format type="color" field="medium">
-          <colorPalette type="minMidMax" maxColor="#62B3B2" minColor="#FFFFFF"></colorPalette>
-          <scale type="minMidMax"></scale>
-        </format>
-      </table>
-    </panel>
-    <panel>
-      <table>
-        <title>Alerts by Repo</title>
+        <fieldForLabel>type</fieldForLabel>
+        <fieldForValue>type</fieldForValue>
+        <valuePrefix>"</valuePrefix>
+        <valueSuffix>"</valueSuffix>
+        <delimiter> ,</delimiter>
+      </input>
+      <input type="multiselect" token="severityTkn" searchWhenChanged="true">
+        <label>Severity</label>
+        <choice value="*">All</choice>
+        <default>*</default>
+        <initialValue>*</initialValue>
         <search base="baseSearch">
-          <query>| search (action=created OR action=reopened)  repository=$repoTkn$ tool=$tool_name$| chart usenull=f count over repository by tool</query>
+          <query>|dedup severity| table severity</query>
         </search>
-        <option name="drilldown">none</option>
+        <fieldForLabel>severity</fieldForLabel>
+        <fieldForValue>severity</fieldForValue>
+        <valuePrefix>"</valuePrefix>
+        <valueSuffix>"</valueSuffix>
+        <delimiter> ,</delimiter>
+      </input>
+      <input type="multiselect" token="statusTkn" searchWhenChanged="true">
+        <label>Status</label>
+        <choice value="*">All</choice>
+        <default>*</default>
+        <initialValue>*</initialValue>
+        <search base="baseSearch">
+          <query>|dedup status| table status</query>
+        </search>
+        <fieldForLabel>status</fieldForLabel>
+        <fieldForValue>status</fieldForValue>
+        <valuePrefix>"</valuePrefix>
+        <valueSuffix>"</valueSuffix>
+        <delimiter> ,</delimiter>
+      </input>
+      <table>
+        <search base="baseSearch">
+          <query>|search severity IN($severityTkn$) status IN($statusTkn$) type IN($typeTkn$) | sort -age</query>
+        </search>
+        <fields>repository, reason, id, type,severity,status, created_at, age</fields>
+        <drilldown target="_blank">
+          <link>$row.url|n$</link>
+        </drilldown>
+        <option name="count">20</option>
+        <option name="dataOverlayMode">none</option>
+        <option name="drilldown">row</option>
         <option name="percentagesRow">false</option>
         <option name="refresh.display">progressbar</option>
+        <option name="rowNumbers">false</option>
         <option name="totalsRow">false</option>
-        <format type="color" field="repository.name">
-          <colorPalette type="minMidMax" maxColor="#53A051" minColor="#FFFFFF"></colorPalette>
-          <scale type="minMidMax"></scale>
+        <option name="wrap">true</option>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"critical":#DC4E41,"high":#F1813F,"moderate":#F8BE34, "medium":#F8BE34}</colorPalette>
         </format>
       </table>
     </panel>
